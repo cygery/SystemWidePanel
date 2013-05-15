@@ -72,6 +72,7 @@ public class PanelService extends Service {
 
     private boolean statusBarVisible;
     private int statusBarHeight;
+    private int lastOrientation;
 
     // TODO EDIT HERE
     private void registerPanelListeners() {
@@ -109,6 +110,7 @@ public class PanelService extends Service {
 
         statusBarVisible = true; // app starts in non-fullscreen
         statusBarHeight = getStatusBarHeight(); // is constant
+        lastOrientation = getResources().getConfiguration().orientation;
 
         handler = new Handler();
 
@@ -183,20 +185,26 @@ public class PanelService extends Service {
             @Override
             public void onReceive(Context context, Intent intent) {
                 if (intent.getAction().equals(BC_CONFIG_CHANGED)) {
-                    // store panel dimensions before it is destroyed
-                    // swap width/height s.t. they correspond to the new (rotated) layout
-                    panelViewWidth = panelView.getHeight();
-                    panelViewHeight = panelView.getWidth();
+                    Configuration config = getResources().getConfiguration();
 
-                    handler.postDelayed(new Runnable() {
-                        @Override
-                        public void run() {
-                            windowManager.removeView(panelView);
-                            updatePanelView();
-                            updateGlobalCoords();
-                            windowManager.addView(panelView, paramsPanel);
-                        }
-                    }, DELAY_HANDLER);
+                    if (config.orientation != lastOrientation) {
+                        lastOrientation = config.orientation;
+
+                        // store panel dimensions before it is destroyed
+                        // swap width/height s.t. they correspond to the new (rotated) layout
+                        panelViewWidth = panelView.getHeight();
+                        panelViewHeight = panelView.getWidth();
+
+                        handler.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                windowManager.removeView(panelView);
+                                updatePanelView();
+                                updateGlobalCoords();
+                                windowManager.addView(panelView, paramsPanel);
+                            }
+                        }, DELAY_HANDLER);
+                    }
                 }
             }
         };
