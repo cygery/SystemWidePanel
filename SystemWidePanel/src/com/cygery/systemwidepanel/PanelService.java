@@ -43,8 +43,6 @@ import android.widget.RelativeLayout;
 import android.widget.Toast;
 
 // Glitches:
-// - layout change between fullscreen and normal: panel moves during transition, reposition happens
-// _after_ transition finished
 // - orientation change: usual system rotate animation
 public class PanelService extends Service {
     private static final String BC_CONFIG_CHANGED = "android.intent.action.CONFIGURATION_CHANGED";
@@ -110,6 +108,7 @@ public class PanelService extends Service {
 
         statusBarVisible = true; // app starts in non-fullscreen
         statusBarHeight = getStatusBarHeight(); // is constant
+
         lastOrientation = getResources().getConfiguration().orientation;
 
         handler = new Handler();
@@ -126,7 +125,7 @@ public class PanelService extends Service {
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
-        paramsPanel.gravity = Gravity.TOP | Gravity.LEFT;
+        paramsPanel.gravity = Gravity.BOTTOM | Gravity.LEFT;
 
         paramsDummy = new WindowManager.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -165,19 +164,18 @@ public class PanelService extends Service {
         this.setOnStatusBarVisibilityChangeListener(new OnStatusBarVisibilityChangeListener() {
             @Override
             public void onChange() {
-                // store panel dimensions before it is destroyed
-                panelViewHeight = panelView.getHeight();
-                panelViewWidth = panelView.getWidth();
-
-                handler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        windowManager.removeView(panelView);
-                        updatePanelView();
-                        updateGlobalCoords();
-                        windowManager.addView(panelView, paramsPanel);
-                    }
-                }, DELAY_HANDLER);
+                // Only update panel position by clipping its coordinates if it'd else be underneath
+                // the now shown status bar. Else, all coordinates can be kept.
+                if (isPanelBelowStatusBar()) {
+                    handler.postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            clipPanelParams();
+                            updateGlobalCoords();
+                            windowManager.updateViewLayout(panelView, paramsPanel);
+                        }
+                    }, DELAY_HANDLER);
+                }
             }
         });
 
@@ -248,6 +246,20 @@ public class PanelService extends Service {
         return (resID > 0 ? Resources.getSystem().getDimensionPixelSize(resID) : 0); // 0 on error
     }
 
+    // IMPORTANT: not constant! depends on orientation (mind the "landscape" in the identifier)
+    private int getNavigationBarHeight() {
+        int resID;
+
+        if (getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE)
+            resID = Resources.getSystem().getIdentifier("navigation_bar_height_landscape", "dimen",
+                    "android");
+        else
+            resID = Resources.getSystem()
+                    .getIdentifier("navigation_bar_height", "dimen", "android");
+
+        return (resID > 0 ? Resources.getSystem().getDimensionPixelSize(resID) : 0); // 0 on error
+    }
+
     private void updatePanelView() {
         // inflate the panel layout for the _current_ orientation
         panelView = (RelativeLayout) LayoutInflater.from(this).inflate(R.layout.panel, null);
@@ -262,23 +274,15 @@ public class PanelService extends Service {
 
     /**
      * computes the relative panel coordinates (panelParams.x/y) based on global coordinates,
-     * orientation & status bar visibility
+     * orientation & status bar visibility (relative to bottom left corner)
      */
     private void updatePanelParams() {
-        paramsPanel.x = paramsPanel.y = 0;
-
         if (getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE) {
-            if (statusBarVisible)
-                paramsPanel.y -= statusBarHeight;
-
-            paramsPanel.x += globalPanelX;
-            paramsPanel.y += globalPanelY;
+            paramsPanel.x = globalPanelX;
+            paramsPanel.y = globalPanelY - getNavigationBarHeight();
         } else {
-            paramsPanel.x = panelDummyView.getWidth() - globalPanelY - panelViewWidth;
-
-            if (statusBarVisible)
-                paramsPanel.y -= statusBarHeight;
-            paramsPanel.y += globalPanelX;
+            paramsPanel.x = globalPanelY;
+            paramsPanel.y = fullscreenDummyView.getHeight() - globalPanelX - panelViewHeight;
         }
     }
 
@@ -296,23 +300,23 @@ public class PanelService extends Service {
 
     /**
      * computes the global coordinates of the panel using its relative coordinates, screen
-     * orientation & status bar visibility Origin: Top left corner of landscape mode
+     * orientation & status bar visibility Origin: Bottom left corner of landscape mode
      */
     private void updateGlobalCoords() {
-        globalPanelX = globalPanelY = 0;
-
         if (getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE) {
-            if (statusBarVisible)
-                globalPanelY += statusBarHeight;
-
-            globalPanelX += paramsPanel.x;
-            globalPanelY += paramsPanel.y;
+            globalPanelX = paramsPanel.x;
+            globalPanelY = paramsPanel.y + getNavigationBarHeight();
         } else {
-            globalPanelY = panelDummyView.getWidth() - paramsPanel.x - panelViewWidth;
+            globalPanelX = fullscreenDummyView.getHeight() - paramsPanel.y - panelViewHeight;
+            globalPanelY = paramsPanel.x;
+        }
+    }
 
-            if (statusBarVisible)
-                globalPanelX += statusBarHeight;
-            globalPanelX += paramsPanel.y;
+    private boolean isPanelBelowStatusBar() {
+        if (statusBarVisible) {
+            return (paramsPanel.y + panelViewHeight > panelDummyView.getHeight());
+        } else {
+            return false;
         }
     }
 
@@ -346,7 +350,8 @@ public class PanelService extends Service {
                 // show dummy image on dummy overlay at panel's position
                 ((ImageView) panelDummyView.findViewById(R.id.imageView_dummy)).setImageBitmap(bm);
                 panelDummyView.findViewById(R.id.imageView_dummy).setX(paramsPanel.x);
-                panelDummyView.findViewById(R.id.imageView_dummy).setY(paramsPanel.y);
+                panelDummyView.findViewById(R.id.imageView_dummy).setY(
+                        panelDummyView.getHeight() - paramsPanel.y - panelViewHeight);
                 panelDummyView.findViewById(R.id.imageView_dummy).setVisibility(View.VISIBLE);
 
                 // hide real panel
@@ -362,7 +367,7 @@ public class PanelService extends Service {
                     float deltaY = endY - startY;
 
                     paramsPanel.x += deltaX;
-                    paramsPanel.y += deltaY;
+                    paramsPanel.y -= deltaY;
 
                     // the dummy can be dragged such that it partly leaves the screen but the panel
                     // should remain complete within the screen
@@ -397,7 +402,8 @@ public class PanelService extends Service {
                     float deltaY = endY - startY;
 
                     panelDummyView.findViewById(R.id.imageView_dummy).setX(paramsPanel.x + deltaX);
-                    panelDummyView.findViewById(R.id.imageView_dummy).setY(paramsPanel.y + deltaY);
+                    panelDummyView.findViewById(R.id.imageView_dummy).setY(
+                            panelDummyView.getHeight() - paramsPanel.y - panelViewHeight + deltaY);
                 }
                 break;
             case MotionEvent.ACTION_CANCEL:
