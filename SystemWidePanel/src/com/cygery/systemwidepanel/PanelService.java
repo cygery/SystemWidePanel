@@ -30,9 +30,11 @@ import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.os.Handler;
 import android.os.IBinder;
+import android.view.Display;
 import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
+import android.view.Surface;
 import android.view.View;
 import android.view.View.MeasureSpec;
 import android.view.View.OnClickListener;
@@ -45,7 +47,6 @@ import android.widget.Toast;
 // Glitches:
 // - orientation change: usual system rotate animation
 public class PanelService extends Service {
-    private static final String BC_CONFIG_CHANGED = "android.intent.action.CONFIGURATION_CHANGED";
     private static final int DELAY_HANDLER = 50; // determined via trial&error
 
     private Handler handler;
@@ -61,6 +62,7 @@ public class PanelService extends Service {
     private View fullscreenDummyView;
 
     private WindowManager windowManager;
+    private Display display;
     private WindowManager.LayoutParams paramsPanel;
     private WindowManager.LayoutParams paramsDummy;
     private WindowManager.LayoutParams paramsFullscreenDummy;
@@ -70,7 +72,7 @@ public class PanelService extends Service {
 
     private boolean statusBarVisible;
     private int statusBarHeight;
-    private int lastOrientation;
+    private int currentRotation;
 
     // TODO EDIT HERE
     private void registerPanelListeners() {
@@ -106,10 +108,13 @@ public class PanelService extends Service {
 
         // INIT FIELDS
 
+        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        display = windowManager.getDefaultDisplay();
+
         statusBarVisible = true; // app starts in non-fullscreen
         statusBarHeight = getStatusBarHeight(); // is constant
 
-        lastOrientation = getResources().getConfiguration().orientation;
+        currentRotation = display.getRotation();
 
         handler = new Handler();
 
@@ -117,9 +122,7 @@ public class PanelService extends Service {
         statusBarVisibilityCheckerThread = new StatusBarVisibilityCheckerThread();
 
         final IntentFilter filter = new IntentFilter();
-        filter.addAction(BC_CONFIG_CHANGED);
-
-        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        filter.addAction(Intent.ACTION_CONFIGURATION_CHANGED);
 
         paramsPanel = new WindowManager.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -182,16 +185,30 @@ public class PanelService extends Service {
         broadcastReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                if (intent.getAction().equals(BC_CONFIG_CHANGED)) {
-                    Configuration config = getResources().getConfiguration();
+                if (intent.getAction().equals(Intent.ACTION_CONFIGURATION_CHANGED)) {
+                    int newRotation = display.getRotation();
 
-                    if (config.orientation != lastOrientation) {
-                        lastOrientation = config.orientation;
+                    // @formatter:off
+                    // usual rotation values: ("o" denotes the front camera on top)
+                    // ROTATION_0 = 0  ROTATION_90 = 1  ROTATION_180 = 2  ROTATION_270 = 3
+                    // .-----.                          .-----.                         
+                    // | _o_ |         .------------.   | ___ |           .------------.
+                    // ||   ||         | |¯¯¯¯¯¯¯¯| |   ||   ||           | |¯¯¯¯¯¯¯¯| |
+                    // ||   ||         |o|        | |   ||   ||           | |        |o|
+                    // ||___||         | |________| |   ||___||           | |________| |
+                    // |_____|         `------------´   |__o__|           `------------´
+                    // @formatter:on
+                    if (newRotation != currentRotation) {
+                        // detect if orientation (landscape/portrait) also changed (it's possible to
+                        // directly switch from ROTATION_90 to ROTATION_270)
+                        if ((currentRotation - newRotation) % 2 != 0) {
+                            // store panel dimensions before it is destroyed
+                            // swap width/height s.t. they correspond to the new (rotated) layout
+                            panelViewWidth = panelView.getHeight();
+                            panelViewHeight = panelView.getWidth();
+                        }
 
-                        // store panel dimensions before it is destroyed
-                        // swap width/height s.t. they correspond to the new (rotated) layout
-                        panelViewWidth = panelView.getHeight();
-                        panelViewHeight = panelView.getWidth();
+                        currentRotation = newRotation;
 
                         handler.postDelayed(new Runnable() {
                             @Override
@@ -277,12 +294,18 @@ public class PanelService extends Service {
      * orientation & status bar visibility (relative to bottom left corner)
      */
     private void updatePanelParams() {
-        if (getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE) {
+        if (currentRotation == Surface.ROTATION_0) {
+            paramsPanel.x = globalPanelY;
+            paramsPanel.y = fullscreenDummyView.getHeight() - globalPanelX - panelViewHeight;
+        } else if (currentRotation == Surface.ROTATION_180) {
+            paramsPanel.x = fullscreenDummyView.getWidth() - globalPanelY - panelViewWidth;
+            paramsPanel.y = globalPanelX - getNavigationBarHeight();
+        } else if (currentRotation == Surface.ROTATION_90) {
             paramsPanel.x = globalPanelX;
             paramsPanel.y = globalPanelY - getNavigationBarHeight();
         } else {
-            paramsPanel.x = globalPanelY;
-            paramsPanel.y = fullscreenDummyView.getHeight() - globalPanelX - panelViewHeight;
+            paramsPanel.x = fullscreenDummyView.getWidth() - globalPanelX - panelViewWidth;
+            paramsPanel.y = fullscreenDummyView.getHeight() - globalPanelY - panelViewHeight;
         }
     }
 
@@ -303,12 +326,18 @@ public class PanelService extends Service {
      * orientation & status bar visibility Origin: Bottom left corner of landscape mode
      */
     private void updateGlobalCoords() {
-        if (getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE) {
+        if (currentRotation == Surface.ROTATION_0) {
+            globalPanelX = fullscreenDummyView.getHeight() - paramsPanel.y - panelViewHeight;
+            globalPanelY = paramsPanel.x;
+        } else if (currentRotation == Surface.ROTATION_180) {
+            globalPanelX = paramsPanel.y + getNavigationBarHeight();
+            globalPanelY = fullscreenDummyView.getWidth() - paramsPanel.x - panelViewWidth;
+        } else if (currentRotation == Surface.ROTATION_90) {
             globalPanelX = paramsPanel.x;
             globalPanelY = paramsPanel.y + getNavigationBarHeight();
         } else {
-            globalPanelX = fullscreenDummyView.getHeight() - paramsPanel.y - panelViewHeight;
-            globalPanelY = paramsPanel.x;
+            globalPanelX = fullscreenDummyView.getWidth() - paramsPanel.x - panelViewWidth;
+            globalPanelY = fullscreenDummyView.getHeight() - paramsPanel.y - panelViewHeight;
         }
     }
 
