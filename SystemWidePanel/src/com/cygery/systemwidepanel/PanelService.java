@@ -341,6 +341,9 @@ public class PanelService extends Service {
             case MotionEvent.ACTION_DOWN:
                 isDragging = true;
 
+                // make sure height is uptodate (in very rare cases it wasn't)
+                panelViewHeight = panelView.getHeight();
+
                 startX = event.getX();
                 startY = event.getY();
 
