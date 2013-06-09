@@ -4,4 +4,9 @@
     android:layout_height="wrap_content"
     tools:context=".PanelService" >
 
+    <ImageView
+        android:id="@+id/imageView_dummy"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
 </RelativeLayout>

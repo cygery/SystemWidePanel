@@ -19,6 +19,7 @@
  */
 package com.cygery.systemwidepanel;
 
+import android.annotation.SuppressLint;
 import android.app.Service;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -28,6 +29,7 @@ import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.view.Display;
@@ -39,6 +41,7 @@ import android.view.View;
 import android.view.View.MeasureSpec;
 import android.view.View.OnClickListener;
 import android.view.View.OnTouchListener;
+import android.view.ViewGroup.LayoutParams;
 import android.view.WindowManager;
 import android.widget.ImageView;
 import android.widget.RelativeLayout;
@@ -51,8 +54,8 @@ public class PanelService extends Service {
 
     private Handler handler;
     private BroadcastReceiver broadcastReceiver;
-    private StatusBarVisibilityCheckerThread statusBarVisibilityCheckerThread;
-    private OnStatusBarVisibilityChangeListener onStatusBarVisibilityChangeListener;
+    private SystemBarVisibilityCheckerThread systemBarVisibilityCheckerThread;
+    private OnSystemBarVisibilityChangeListener onSystemBarVisibilityChangeListener;
     private PanelViewOnTouchListener panelViewOnTouchListener; // for drag&drop
 
     private RelativeLayout panelView;
@@ -61,16 +64,20 @@ public class PanelService extends Service {
     // View covering whole screen (except navigation bar) to detect status bar presence
     private View fullscreenDummyView;
 
+    private ImageView dummyImageView;
+
     private WindowManager windowManager;
     private Display display;
     private WindowManager.LayoutParams paramsPanel;
     private WindowManager.LayoutParams paramsDummy;
     private WindowManager.LayoutParams paramsFullscreenDummy;
+    private WindowManager.LayoutParams compatLP;
 
     private int globalPanelX, globalPanelY;
     private int panelViewHeight, panelViewWidth;
 
     private boolean statusBarVisible;
+    private boolean navigationBarVisible;
     private int statusBarHeight;
     private int currentRotation;
 
@@ -114,35 +121,36 @@ public class PanelService extends Service {
         statusBarVisible = true; // app starts in non-fullscreen
         statusBarHeight = getStatusBarHeight(); // is constant
 
+        navigationBarVisible = true;
+
         currentRotation = display.getRotation();
 
         handler = new Handler();
 
         panelViewOnTouchListener = new PanelViewOnTouchListener();
-        statusBarVisibilityCheckerThread = new StatusBarVisibilityCheckerThread();
+        systemBarVisibilityCheckerThread = new SystemBarVisibilityCheckerThread();
 
         final IntentFilter filter = new IntentFilter();
         filter.addAction(Intent.ACTION_CONFIGURATION_CHANGED);
 
-        paramsPanel = new WindowManager.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
-        paramsPanel.gravity = Gravity.BOTTOM | Gravity.LEFT;
+        paramsPanel = new WindowManager.LayoutParams(LayoutParams.WRAP_CONTENT,
+                LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
+        paramsPanel.gravity = Gravity.TOP | Gravity.LEFT;
 
-        paramsDummy = new WindowManager.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY,
+        paramsDummy = new WindowManager.LayoutParams(LayoutParams.MATCH_PARENT,
+                LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
 
-        paramsFullscreenDummy = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY,
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
+        paramsFullscreenDummy = new WindowManager.LayoutParams(LayoutParams.MATCH_PARENT,
+                LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
 
         // INIT VIEWS
 
-        panelDummyView = LayoutInflater.from(this).inflate(R.layout.panel_dummy, null);
+        panelDummyView = LayoutInflater.from(this).inflate(R.layout.dummy, null);
         fullscreenDummyView = LayoutInflater.from(this).inflate(R.layout.fullscreen_dummy, null);
 
         // measure panel's dimensions to allow clipping & updating its coords before displaying it
@@ -158,27 +166,38 @@ public class PanelService extends Service {
         windowManager.addView(fullscreenDummyView, paramsFullscreenDummy);
         windowManager.addView(panelDummyView, paramsDummy);
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
+            dummyImageView = (ImageView) fullscreenDummyView.findViewById(R.id.imageView_dummy);
+        } else {
+            dummyImageView = new ImageView(this);
+            compatLP = new WindowManager.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT, paramsPanel.x, paramsPanel.y,
+                    WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT);
+            compatLP.gravity = Gravity.TOP | Gravity.LEFT;
+            windowManager.addView(dummyImageView, compatLP);
+        }
+
         // remaining INIT
 
         // IMPORTANT: for all updates: wait DELAY_HANDLER ms to ensure dummyPanelView is refreshed,
         // else updatePanelParams() and clipPanelParams() (both called by updatePanelView()) might
         // get a wrong width/height of dummyPanelView => relative/global coords broken
 
-        this.setOnStatusBarVisibilityChangeListener(new OnStatusBarVisibilityChangeListener() {
+        this.setOnSystemBarVisibilityChangeListener(new OnSystemBarVisibilityChangeListener() {
             @Override
             public void onChange() {
-                // Only update panel position by clipping its coordinates if it'd else be underneath
-                // the now shown status bar. Else, all coordinates can be kept.
-                if (isPanelBelowStatusBar()) {
-                    handler.postDelayed(new Runnable() {
-                        @Override
-                        public void run() {
-                            clipPanelParams();
-                            updateGlobalCoords();
-                            windowManager.updateViewLayout(panelView, paramsPanel);
-                        }
-                    }, DELAY_HANDLER);
-                }
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        clipPanelParams();
+                        updateGlobalCoords();
+                        windowManager.updateViewLayout(panelView, paramsPanel);
+                    }
+                }, DELAY_HANDLER);
             }
         });
 
@@ -234,7 +253,7 @@ public class PanelService extends Service {
                 windowManager.addView(panelView, paramsPanel);
 
                 registerReceiver(broadcastReceiver, filter);
-                statusBarVisibilityCheckerThread.start();
+                systemBarVisibilityCheckerThread.start();
             }
         }, DELAY_HANDLER);
     }
@@ -248,7 +267,7 @@ public class PanelService extends Service {
     public void onDestroy() {
         super.onDestroy();
 
-        statusBarVisibilityCheckerThread.stopThread();
+        systemBarVisibilityCheckerThread.stopThread();
 
         windowManager.removeView(panelView);
         windowManager.removeView(panelDummyView);
@@ -291,70 +310,87 @@ public class PanelService extends Service {
 
     /**
      * computes the relative panel coordinates (panelParams.x/y) based on global coordinates,
-     * orientation & status bar visibility (relative to bottom left corner)
+     * orientation & navigation bar visibility (relative to current top left corner of screen)
      */
     private void updatePanelParams() {
         if (currentRotation == Surface.ROTATION_0) {
-            paramsPanel.x = globalPanelY;
-            paramsPanel.y = fullscreenDummyView.getHeight() - globalPanelX - panelViewHeight;
-        } else if (currentRotation == Surface.ROTATION_180) {
             paramsPanel.x = fullscreenDummyView.getWidth() - globalPanelY - panelViewWidth;
-            paramsPanel.y = globalPanelX - getNavigationBarHeight();
+            paramsPanel.y = globalPanelX;
+        } else if (currentRotation == Surface.ROTATION_180) {
+            paramsPanel.x = globalPanelY;
+            if (navigationBarVisible)
+                paramsPanel.y = fullscreenDummyView.getHeight() + getNavigationBarHeight()
+                        - globalPanelX - panelViewHeight;
+            else
+                paramsPanel.y = fullscreenDummyView.getHeight() - globalPanelX - panelViewHeight;
         } else if (currentRotation == Surface.ROTATION_90) {
             paramsPanel.x = globalPanelX;
-            paramsPanel.y = globalPanelY - getNavigationBarHeight();
+            paramsPanel.y = globalPanelY;
         } else {
             paramsPanel.x = fullscreenDummyView.getWidth() - globalPanelX - panelViewWidth;
-            paramsPanel.y = fullscreenDummyView.getHeight() - globalPanelY - panelViewHeight;
+            if (navigationBarVisible)
+                paramsPanel.y = fullscreenDummyView.getHeight() + getNavigationBarHeight()
+                        - globalPanelY - panelViewHeight;
+            else
+                paramsPanel.y = fullscreenDummyView.getHeight() - globalPanelY - panelViewHeight;
         }
     }
 
+    /**
+     * Clip the relative panel coordinates regarding the visibility of status/navigation bar
+     */
     private void clipPanelParams() {
+        // X coordinate
         if (paramsPanel.x < 0)
             paramsPanel.x = 0;
-        if (paramsPanel.y < 0)
-            paramsPanel.y = 0;
-
         if (paramsPanel.x > panelDummyView.getWidth() - panelViewWidth)
             paramsPanel.x = panelDummyView.getWidth() - panelViewWidth;
-        if (paramsPanel.y > panelDummyView.getHeight() - panelViewHeight)
-            paramsPanel.y = panelDummyView.getHeight() - panelViewHeight;
+
+        // Y coordinate
+        if (statusBarVisible) {
+            if (paramsPanel.y < statusBarHeight)
+                paramsPanel.y = statusBarHeight;
+        } else {
+            if (paramsPanel.y < 0)
+                paramsPanel.y = 0;
+        }
+        // fullscreenDummyView always ignores status bar and always goes either down to the top of
+        // the navigation bar or down to the bottom of the screen (if the navigation bar is
+        // invisible)
+        if (paramsPanel.y > fullscreenDummyView.getHeight() - panelViewHeight)
+            paramsPanel.y = fullscreenDummyView.getHeight() - panelViewHeight;
     }
 
     /**
      * computes the global coordinates of the panel using its relative coordinates, screen
-     * orientation & status bar visibility Origin: Bottom left corner of landscape mode
+     * orientation & status bar visibility Origin: top left corner of landscape mode
      */
     private void updateGlobalCoords() {
         if (currentRotation == Surface.ROTATION_0) {
-            globalPanelX = fullscreenDummyView.getHeight() - paramsPanel.y - panelViewHeight;
-            globalPanelY = paramsPanel.x;
-        } else if (currentRotation == Surface.ROTATION_180) {
-            globalPanelX = paramsPanel.y + getNavigationBarHeight();
+            globalPanelX = paramsPanel.y;
             globalPanelY = fullscreenDummyView.getWidth() - paramsPanel.x - panelViewWidth;
+        } else if (currentRotation == Surface.ROTATION_180) {
+            globalPanelX = fullscreenDummyView.getHeight() - paramsPanel.y - panelViewHeight;
+            if (navigationBarVisible)
+                globalPanelX += getNavigationBarHeight();
+            globalPanelY = paramsPanel.x;
         } else if (currentRotation == Surface.ROTATION_90) {
             globalPanelX = paramsPanel.x;
-            globalPanelY = paramsPanel.y + getNavigationBarHeight();
+            globalPanelY = paramsPanel.y;
         } else {
             globalPanelX = fullscreenDummyView.getWidth() - paramsPanel.x - panelViewWidth;
             globalPanelY = fullscreenDummyView.getHeight() - paramsPanel.y - panelViewHeight;
+            if (navigationBarVisible)
+                globalPanelY += getNavigationBarHeight();
         }
     }
 
-    private boolean isPanelBelowStatusBar() {
-        if (statusBarVisible) {
-            return (paramsPanel.y + panelViewHeight > panelDummyView.getHeight());
-        } else {
-            return false;
-        }
-    }
-
-    private interface OnStatusBarVisibilityChangeListener {
+    private interface OnSystemBarVisibilityChangeListener {
         public void onChange();
     }
 
-    public void setOnStatusBarVisibilityChangeListener(OnStatusBarVisibilityChangeListener l) {
-        onStatusBarVisibilityChangeListener = l;
+    public void setOnSystemBarVisibilityChangeListener(OnSystemBarVisibilityChangeListener l) {
+        onSystemBarVisibilityChangeListener = l;
     }
 
     /**
@@ -380,14 +416,21 @@ public class PanelService extends Service {
                 Bitmap bm = panelView.getDrawingCache();
 
                 // show dummy image on dummy overlay at panel's position
-                ((ImageView) panelDummyView.findViewById(R.id.imageView_dummy)).setImageBitmap(bm);
-                panelDummyView.findViewById(R.id.imageView_dummy).setX(paramsPanel.x);
-                panelDummyView.findViewById(R.id.imageView_dummy).setY(
-                        panelDummyView.getHeight() - paramsPanel.y - panelViewHeight);
-                panelDummyView.findViewById(R.id.imageView_dummy).setVisibility(View.VISIBLE);
+                dummyImageView.setImageBitmap(bm);
+                updateDummyImagePosition(paramsPanel.x, paramsPanel.y);
+                dummyImageView.setVisibility(View.VISIBLE);
 
                 // hide real panel
-                panelView.setVisibility(View.INVISIBLE);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
+                    panelView.setVisibility(View.INVISIBLE);
+                } else {
+                    handler.postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            panelView.setVisibility(View.INVISIBLE);
+                        }
+                    }, DELAY_HANDLER);
+                }
                 break;
             case MotionEvent.ACTION_UP:
                 if (isDragging) {
@@ -399,7 +442,7 @@ public class PanelService extends Service {
                     float deltaY = endY - startY;
 
                     paramsPanel.x += deltaX;
-                    paramsPanel.y -= deltaY;
+                    paramsPanel.y += deltaY;
 
                     // the dummy can be dragged such that it partly leaves the screen but the panel
                     // should remain complete within the screen
@@ -414,10 +457,15 @@ public class PanelService extends Service {
                     handler.postDelayed(new Runnable() {
                         @Override
                         public void run() {
-                            panelDummyView.findViewById(R.id.imageView_dummy).setVisibility(
-                                    View.INVISIBLE);
+                            dummyImageView.setVisibility(View.INVISIBLE);
+                            // a short click on the drag button results in ACTION_DOWN followed
+                            // directly by ACTION_UP (=drop). On older devices it might happen that
+                            // the first setVisibility on panelView here might be before it was set
+                            // invisible in ACTION_DOWN -> panel would be invisible -> as a safety
+                            // measure, make visible again here
+                            panelView.setVisibility(View.VISIBLE);
                         }
-                    }, DELAY_HANDLER);
+                    }, 2 * DELAY_HANDLER);
 
                     updateGlobalCoords();
                 }
@@ -433,9 +481,7 @@ public class PanelService extends Service {
                     float deltaX = endX - startX;
                     float deltaY = endY - startY;
 
-                    panelDummyView.findViewById(R.id.imageView_dummy).setX(paramsPanel.x + deltaX);
-                    panelDummyView.findViewById(R.id.imageView_dummy).setY(
-                            panelDummyView.getHeight() - paramsPanel.y - panelViewHeight + deltaY);
+                    updateDummyImagePosition(paramsPanel.x + deltaX, paramsPanel.y + deltaY);
                 }
                 break;
             case MotionEvent.ACTION_CANCEL:
@@ -444,7 +490,7 @@ public class PanelService extends Service {
                 panelView.setVisibility(View.VISIBLE);
 
                 // make dummy invisible, else canvas error because of reusing bitmap is possible
-                panelDummyView.findViewById(R.id.imageView_dummy).setVisibility(View.INVISIBLE);
+                dummyImageView.setVisibility(View.INVISIBLE);
                 break;
             default:
                 break;
@@ -452,16 +498,32 @@ public class PanelService extends Service {
 
             return true;
         }
+
+        @SuppressLint("NewApi")
+        protected void updateDummyImagePosition(float x, float y) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
+                dummyImageView.setX(x);
+                dummyImageView.setY(y);
+            } else {
+                compatLP.x = (int) x;
+                compatLP.y = (int) y;
+                windowManager.updateViewLayout(dummyImageView, compatLP);
+            }
+        }
     };
 
     /**
      * simple Thread which monitors the height's of the dummy and fullscreenDummy overlays. Heights
-     * match iff the status bar is not present, a difference of the status bar height corresponds to
-     * a present status bar
+     * match if the status bar is not present, a difference of the status bar height corresponds to
+     * a present status bar. Also tries to detect navigation bar visibility depending on height of
+     * the fullscreenDummy overlay. Note: On >=HC devices a OnSystemUiVisibilityChangeListener could
+     * be used to detect the visibility of the navigation bar (sometimes it doesn't work for the
+     * status bar).
      */
-    private class StatusBarVisibilityCheckerThread extends Thread {
+    private class SystemBarVisibilityCheckerThread extends Thread {
         private volatile boolean running;
 
+        @Override
         public void run() {
             running = true;
 
@@ -469,16 +531,34 @@ public class PanelService extends Service {
                 int fullscreenDummyHeight = fullscreenDummyView.getHeight();
                 int panelDummyHeight = panelDummyView.getHeight();
 
-                boolean oldVis = statusBarVisible;
+                boolean oldStatusBarVis = statusBarVisible;
+                boolean oldNavigationBarVis = navigationBarVisible;
 
-                if (fullscreenDummyHeight - panelDummyHeight == statusBarHeight)
-                    statusBarVisible = true;
-                else if (fullscreenDummyHeight == panelDummyHeight)
+                // hack: we assume, that
+                // (1) The physical screen dimensions are multiples of 10
+                // (2) fullscreenDummyHeight%10 == 0 => fullscreenDummyHeight == screen height
+                // (3) fullscreenDummyHeight == screen height => navigation (and status) bar hidden
+                // (4) fullscreenDummyHeight == panelDummyHeight => status bar hidden
+                // (5) fullscreenDummyHeight-panelDummyHeight==statusBarHeight => status bar shown
+                // (The main problem is that there's no official way to get the physical resolution
+                // before API17 and not even an unofficial before API14)
+                if (fullscreenDummyHeight == panelDummyHeight) {
                     statusBarVisible = false;
-                // else, probably just one view changed orientation
+                    if ((fullscreenDummyHeight % 10) == 0)
+                        navigationBarVisible = false;
+                    else
+                        navigationBarVisible = true;
+                } else if (fullscreenDummyHeight - panelDummyHeight == statusBarHeight) {
+                    statusBarVisible = true;
+                    if ((fullscreenDummyHeight % 10) == 0)
+                        navigationBarVisible = false; // (unlikely case)
+                    else
+                        navigationBarVisible = true;
+                }
 
-                if (oldVis != statusBarVisible)
-                    onStatusBarVisibilityChangeListener.onChange();
+                if (oldStatusBarVis != statusBarVisible
+                        || oldNavigationBarVis != navigationBarVisible)
+                    onSystemBarVisibilityChangeListener.onChange();
 
                 try {
                     sleep(DELAY_HANDLER);
