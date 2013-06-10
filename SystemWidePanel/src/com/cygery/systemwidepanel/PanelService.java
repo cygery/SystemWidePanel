@@ -273,6 +273,9 @@ public class PanelService extends Service {
         windowManager.removeView(panelDummyView);
         windowManager.removeView(fullscreenDummyView);
 
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.HONEYCOMB)
+            windowManager.removeView(dummyImageView);
+
         unregisterReceiver(broadcastReceiver);
     }
 
