@@ -2,8 +2,8 @@ ABOUT
 =====
 
 SystemWidePanel is a Service which shows a drag&drop-enabled panel system-wide. 
-It can be put everywhere on the screen except on top of the status or navigation 
-bar. Usually, the panel is on top of everything else. Using appropriate panel 
+It can be put everywhere on the screen except on top of the navigation bar. 
+Usually, the panel is on top of everything else. Using appropriate panel 
 layouts for both orientations with exactly the same dimensions (just other 
 orientations), the panel keeps its position after an orientation change (if 
 possible).

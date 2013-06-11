@@ -81,6 +81,8 @@ public class PanelService extends Service {
     private int statusBarHeight;
     private int currentRotation;
 
+    private boolean ignoreStatusBar;
+
     // TODO EDIT HERE
     private void registerPanelListeners() {
         panelView.findViewById(R.id.button1).setOnClickListener(new OnClickListener() {
@@ -124,6 +126,8 @@ public class PanelService extends Service {
         navigationBarVisible = true;
 
         currentRotation = display.getRotation();
+
+        ignoreStatusBar = true;
 
         handler = new Handler();
 
@@ -350,7 +354,7 @@ public class PanelService extends Service {
             paramsPanel.x = panelDummyView.getWidth() - panelViewWidth;
 
         // Y coordinate
-        if (statusBarVisible) {
+        if (statusBarVisible && !ignoreStatusBar) {
             if (paramsPanel.y < statusBarHeight)
                 paramsPanel.y = statusBarHeight;
         } else {
